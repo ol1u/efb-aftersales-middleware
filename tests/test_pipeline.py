@@ -362,3 +362,20 @@ def test_quote_of_ask_post_recovers_original(tmp_path):
     assert len(outbox.posts) == 2
     assert "结合原消息的总结" in outbox.posts[1][1]
     assert db.recent_threads(GROUP, 10 ** 9)
+
+
+def test_exact_resend_gets_already_handled_notice(tmp_path):
+    ai = FakeAI(default_handler)
+    service, db, outbox = make_env(tmp_path, ai)
+    service.handle(incoming(PROBLEM_TEXT, msg_id="4001"))
+    assert len(outbox.posts) == 1
+    calls_before = len(ai.calls)
+    service.handle(incoming(PROBLEM_TEXT, msg_id="4002"))  # verbatim resend
+    assert len(outbox.posts) == 2
+    notice = outbox.posts[1][1]
+    assert "已经处理过了" in notice and "#1" in notice
+    assert len(ai.calls) == calls_before  # the notice needs no AI call
+    assert len(db.thread_messages(1, limit=10)) == 2  # resend filed under #1
+    # a resend WITH additions still goes through the copy+append AI path
+    service.handle(incoming(PROBLEM_TEXT + " 另外补充：已经拍了视频"))
+    assert len(ai.calls) > calls_before

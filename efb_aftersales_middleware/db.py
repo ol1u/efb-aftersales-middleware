@@ -293,12 +293,14 @@ class Database:
             stored = _normalize_text(row["raw_text"])
             if len(stored) < 10 or len(stored) <= best_len:
                 continue
-            if incoming.startswith(stored) and len(incoming) - len(stored) >= 2:
+            # An appended delta of >= 2 chars, or a verbatim resend (delta
+            # ""); a 1-char remainder is punctuation noise, not a copy.
+            if incoming.startswith(stored) and len(incoming) - len(stored) != 1:
                 best_row, best_len = row, len(stored)
         if best_row is None:
             return None
         delta = incoming[best_len:].lstrip(" \t:：,，;；")
-        return (best_row, delta) if delta else None
+        return best_row, delta
 
     def find_posted_record(self, group_id: str, text: str) -> Optional[sqlite3.Row]:
         """The posted record whose text matches, when one of our own posts

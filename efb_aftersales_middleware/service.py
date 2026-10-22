@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 TEXTUAL_TYPES = {"Text", "Link"}
 QUOTE_DIVIDER = " - - - - - - - - - - - - - - - "
 QUOTE_HINT_FOOTER = "（补充或纠正时，请引用本条消息回复，我能准确对应到这个问题。）"
+DUPLICATE_RESEND = "__duplicate_resend__"
 THREAD_WINDOW_SECONDS = 72 * 3600
 
 DEFAULT_MODES: Dict[str, str] = {
@@ -168,6 +169,12 @@ class AfterSalesService:
 
         hint_thread, hint_text, content = self._trace(msg, raw)
         record = self._archive(msg, raw)
+        if hint_text == DUPLICATE_RESEND and hint_thread is not None:
+            self.db.set_record_thread(record["id"], hint_thread)
+            self.db.touch_thread(hint_thread)
+            body = "这条已经处理过了（问题 #{}），是有什么需要补充的吗？".format(hint_thread)
+            self._post(msg, quote_block(msg.display_name, raw, body), hint_thread)
+            return
         if self.ai is None:
             return
 
@@ -253,9 +260,15 @@ class AfterSalesService:
         if found is not None:
             source, delta = found
             if source["thread_id"]:
+                if not delta:
+                    # Verbatim resend of a message already in a thread:
+                    # handled deterministically in _process, no AI call.
+                    return source["thread_id"], DUPLICATE_RESEND, raw
                 return source["thread_id"], "这条消息开头复制了问题编号 {} 中消息的全文，正文是追加的新内容。".format(
                     source["thread_id"]), delta
-            return None, "", delta
+            # Copy of a message that never became a thread: appended text is
+            # judged on its own; a verbatim resend is judged as the full text.
+            return None, "", delta if delta else raw
         own = [t for t in self.db.recent_threads(msg.group_id, THREAD_WINDOW_SECONDS, limit=8)
                if t["opener_id"] == msg.sender_id]
         if own:
