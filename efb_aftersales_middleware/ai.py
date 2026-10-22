@@ -101,6 +101,13 @@ class DeepSeekClient:
             self.session.proxies.update({"http": proxy, "https": proxy})
 
     def _chat_json(self, prompt: str) -> Optional[Dict[str, Any]]:
+        result = self._chat_json_once(prompt)
+        if result is None:
+            logger.warning("AI reply unusable; retrying once")
+            result = self._chat_json_once(prompt)
+        return result
+
+    def _chat_json_once(self, prompt: str) -> Optional[Dict[str, Any]]:
         try:
             resp = self.session.post(
                 "{}/chat/completions".format(self.base),
@@ -119,12 +126,12 @@ class DeepSeekClient:
             return None
         match = _JSON_RE.search(content or "")
         if not match:
-            logger.warning("AI reply is not JSON")
+            logger.warning("AI reply is not JSON: %r", (content or "")[:400])
             return None
         try:
             parsed = json.loads(match.group(0))
         except ValueError:
-            logger.warning("AI reply JSON is invalid")
+            logger.warning("AI reply JSON is invalid: %r", (content or "")[:400])
             return None
         return parsed if isinstance(parsed, dict) else None
 
