@@ -22,6 +22,7 @@ never reprocessed.
 
 import json
 import logging
+import re
 import threading
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Protocol, Tuple
@@ -98,10 +99,103 @@ def _hint_tag(hint: str, quoted_msg_id: Optional[str]) -> str:
         return "quote-id" if quoted_msg_id else "quote-text"
     if "复制了问题编号" in hint:
         return "copy"
+    if "案例卡一致" in hint:
+        return "card-match"
     if "进行中的问题编号" in hint:
         return "own-thread"
     return "none" if not hint else "other"
 
+
+
+EMPTY_CARD: Dict[str, Any] = {"customer": "", "phone": "", "order_no": "", "spec": "",
+                              "issue": "", "demand": "", "status": "", "facts": []}
+
+RESOLUTION_SIGNALS = ("已解决", "解决了", "处理好了", "搞定了", "客户接受了", "客户同意了",
+                      "已补发", "已退款", "已换新", "没问题了", "已经处理好")
+
+
+def parse_card(raw: Optional[str]) -> Dict[str, Any]:
+    """Parse a stored thread card; anything unusable becomes an empty card."""
+    if raw:
+        try:
+            value = json.loads(raw)
+        except (TypeError, ValueError):
+            value = None
+        if isinstance(value, dict):
+            card = dict(EMPTY_CARD)
+            for key in EMPTY_CARD:
+                if key in value:
+                    card[key] = value[key]
+            if not isinstance(card["facts"], list):
+                card["facts"] = []
+            return card
+    return dict(EMPTY_CARD)
+
+
+def card_json(card: Dict[str, Any]) -> str:
+    return json.dumps(card, ensure_ascii=False)
+
+
+def _order_tail(order_no: Optional[str]) -> str:
+    text = (order_no or "").strip()
+    return text[-4:] if len(text) > 4 else text
+
+
+def assemble_summary(card: Dict[str, Any]) -> str:
+    """The one-line problem summary, assembled from the case card."""
+    bits = []
+    head = card.get("customer") or ""
+    tail = _order_tail(card.get("order_no"))
+    if head and tail:
+        bits.append("{}（订单尾号 {}）".format(head, tail))
+    elif head:
+        bits.append(head)
+    elif tail:
+        bits.append("订单尾号 " + tail)
+    if card.get("spec"):
+        bits.append(card["spec"])
+    if card.get("issue"):
+        bits.append(card["issue"])
+    if card.get("demand"):
+        bits.append("诉求：" + card["demand"])
+    return "；".join(bits) or "（信息待补充）"
+
+
+def card_line(card: Dict[str, Any]) -> str:
+    """Compact one-line rendering of a card for the AI context."""
+    fields = []
+    for key, label in (("customer", "客户"), ("phone", "电话"), ("order_no", "订单"),
+                       ("spec", "规格"), ("issue", "问题"), ("demand", "诉求"),
+                       ("status", "状态")):
+        if card.get(key):
+            fields.append("{}：{}".format(label, card[key]))
+    line = "｜".join(fields)
+    if card.get("facts"):
+        line += "｜已确认：" + "；".join(str(f) for f in card["facts"])
+    return line
+
+
+def quote_excerpt(text: Optional[str], limit: int = 44) -> str:
+    """A short human-facing excerpt for a post's quote block.
+
+    Attribution is id-based, so the quote only needs to tell people which
+    message a post answers. Order dumps end with the actual problem, so the
+    last paragraph is the most informative part; quoting it also stops the
+    assistant from rebroadcasting full addresses and phone numbers.
+    """
+    whole = " ".join((text or "").split())
+    if len(whole) <= limit:
+        return whole
+    paragraphs = [p for p in re.split(r"\n\s*\n", text or "") if p.strip()]
+    if paragraphs:
+        last = " ".join(paragraphs[-1].split())
+        if len(last) >= 10:
+            return last[:limit] + ("…" if len(last) > limit else "")
+    return whole[:limit] + "…"
+
+
+def _resolution_signal(text: Optional[str]) -> bool:
+    return any(signal in (text or "") for signal in RESOLUTION_SIGNALS)
 
 class AfterSalesService:
     def __init__(self, config: Config, db: Database, outbox: Outbox,
@@ -197,7 +291,7 @@ class AfterSalesService:
             self.db.set_record_thread(record["id"], hint_thread)
             self.db.touch_thread(hint_thread)
             body = "这条已经处理过了（问题 #{}），是有什么需要补充的吗？".format(hint_thread)
-            self._post(msg, quote_block(msg.display_name, raw, body), hint_thread)
+            self._post(msg, quote_block(msg.display_name, quote_excerpt(raw), body), hint_thread)
             logger.info("decision msg=%s -> duplicate notice for thread %s",
                         msg.msg_id, hint_thread)
             return
@@ -225,40 +319,71 @@ class AfterSalesService:
         if result is None:
             logger.info("decision msg=%s -> silent (no ai result)", msg.msg_id)
             return
-        if result["confidence"] < self.config.ai.post_min_confidence:
+        threshold = (self.config.ai.ask_min_confidence if result["action"] == "ask"
+                     else self.config.ai.post_min_confidence)
+        if result["confidence"] < threshold:
             logger.info("decision msg=%s -> silent (action=%s confidence=%.2f < %.2f)",
-                        msg.msg_id, result["action"], result["confidence"],
-                        self.config.ai.post_min_confidence)
+                        msg.msg_id, result["action"], result["confidence"], threshold)
             return
         logger.info("decision msg=%s action=%s confidence=%.2f",
                     msg.msg_id, result["action"], result["confidence"])
 
         action = result["action"]
+        card = result["card"]
+        summary = assemble_summary(card)
         if action == "new_problem":
             thread = self.db.create_thread(
                 group_id=msg.group_id, opener_id=msg.sender_id, opener_name=msg.display_name,
-                summary=result["summary"], plan=result["plan"])
+                summary=summary, plan=result["plan"], card=card_json(card))
             self.db.set_record_thread(record["id"], thread["id"])
-            body = "【问题总结】\n{}\n【建议方案】\n{}".format(result["summary"], result["plan"])
-            self._post(msg, quote_block(msg.display_name, raw, body), thread["id"])
+            body = "【问题总结】\n{}\n【建议方案】\n{}".format(summary, result["plan"])
+            self._post(msg, quote_block(msg.display_name, quote_excerpt(raw), body), thread["id"])
+            if card.get("status") == "已解决":
+                self._archive_case(thread["id"], card, result["plan"], msg, announce=None)
         elif action in ("update", "note"):
             thread = self._resolve_thread(msg.group_id, result.get("thread_id"), hint_thread, threads)
             if thread is None:
                 return
             self.db.set_record_thread(record["id"], thread["id"])
+            if thread["status"] != "open":
+                self.db.reopen_thread(thread["id"])
             if action == "note":
                 self.db.touch_thread(thread["id"])
+                if _resolution_signal(content):
+                    self._archive_case(thread["id"], parse_card(thread["card"]),
+                                       thread["plan"], msg, announce=msg)
                 return
-            self.db.update_thread(thread["id"], result["summary"], result["plan"])
+            self.db.update_thread(thread["id"], summary, result["plan"], card=card_json(card))
             opening = self.db.thread_opening(thread["id"])
             q_name = opening["sender_name"] if opening is not None else thread["opener_name"]
             q_text = opening["raw_text"] if opening is not None else raw
-            body = "【问题总结】\n{}\n【建议方案】\n{}".format(result["summary"], result["plan"])
-            self._post(msg, quote_block(q_name, q_text, body), thread["id"])
+            body = "【进展】{}\n【当前方案】\n{}".format(result["progress"], result["plan"])
+            self._post(msg, quote_block(q_name, quote_excerpt(q_text), body), thread["id"])
+            if card.get("status") == "已解决" or _resolution_signal(content):
+                self._archive_case(thread["id"], card, result["plan"], msg, announce=msg)
         elif action == "ask":
             thread_id = result.get("thread_id") or hint_thread
             body = "【确认一下】\n{}".format(result["question"])
-            self._post(msg, quote_block(msg.display_name, raw, body), thread_id)
+            self._post(msg, quote_block(msg.display_name, quote_excerpt(raw), body),
+                       thread_id, target_id=record["id"])
+
+    # -- resolution ------------------------------------------------------------
+
+    def _archive_case(self, thread_id: int, card: Dict[str, Any], plan: Optional[str],
+                      msg: Incoming, announce: Optional[Incoming]) -> None:
+        """Close a thread and distill it into a knowledge-base case."""
+        self.db.resolve_thread(thread_id)
+        case_text = "已解决案例：{}｜规格：{}｜最终方案：{}".format(
+            assemble_summary(card), card.get("spec") or "—", plan or "—")
+        self.db.kb_add_messages("resolved-cases", [{
+            "chat_key": "resolved:{}".format(msg.group_id),
+            "sender_name": "已解决案例", "sent_at": self.db.now(), "text": case_text}])
+        logger.info("thread #%s resolved; distilled into the knowledge base", thread_id)
+        if announce is not None:
+            body = "问题 #{} 已处理完，处理结果已存入案例库。".format(thread_id)
+            self._post(announce,
+                       quote_block(announce.display_name, quote_excerpt(announce.text), body),
+                       thread_id)
 
     # -- helpers -----------------------------------------------------------------
 
@@ -276,8 +401,14 @@ class AfterSalesService:
             if record["kind"] == "posted":
                 # One of our posts with no thread (an ask): recover the
                 # message it asked about so the AI can use the answer.
-                _, asked_about, _ = split_quote(record["raw_text"] or "")
-                original = asked_about or (record["raw_text"] or "")
+                original = ""
+                if record["target_id"]:
+                    target = self.db.get_record(record["target_id"])
+                    if target is not None:
+                        original = target["raw_text"] or ""
+                if not original:
+                    _, asked_about, _ = split_quote(record["raw_text"] or "")
+                    original = asked_about or (record["raw_text"] or "")
                 return None, (
                     "这条消息引用了你之前发出的一条提问帖，你当时是就下面这条消息提问的，"
                     "对方这条是回答。请结合原消息和回答判断：信息足够就按 new_problem "
@@ -306,6 +437,10 @@ class AfterSalesService:
             # Copy of a message that never became a thread: appended text is
             # judged on its own; a verbatim resend is judged as the full text.
             return None, "", delta if delta else raw
+        card_thread = self._card_match_thread(msg.group_id, raw)
+        if card_thread is not None:
+            return card_thread, "这条消息里的订单号/电话与问题编号 {} 的案例卡一致。".format(
+                card_thread), raw
         own = [t for t in self.db.recent_threads(msg.group_id, THREAD_WINDOW_SECONDS, limit=8)
                if t["opener_id"] == msg.sender_id]
         if own:
@@ -326,12 +461,32 @@ class AfterSalesService:
             return thread
         return None
 
+    def _card_match_thread(self, group_id: str, text: str) -> Optional[int]:
+        """Deterministic attribution: the message carries the phone number
+        or order number of an open thread's case card."""
+        phones = set(re.findall(r"1\d{10}", text or ""))
+        orders = {m.upper() for m in re.findall(r"SF\d{8,}", text or "", flags=re.I)}
+        orders |= set(re.findall(r"\d{15,20}", text or ""))
+        if not phones and not orders:
+            return None
+        for thread in self.db.recent_threads(group_id, THREAD_WINDOW_SECONDS, limit=8):
+            card = parse_card(thread["card"])
+            card_phones = set(re.findall(r"1\d{10}", card.get("phone") or ""))
+            if phones and card_phones and phones & card_phones:
+                return thread["id"]
+            card_order = (card.get("order_no") or "").upper()
+            if card_order and any(card_order == o or card_order in o or o in card_order
+                                  for o in orders if len(o) >= 8):
+                return thread["id"]
+        return None
+
     def _threads_text(self, threads: List[Any]) -> str:
         blocks = []
         for t in threads:
+            line = card_line(parse_card(t["card"]))
             lines = [
                 "问题编号 {}（提出者：{}，已更新 {} 版）".format(t["id"], t["opener_name"], t["version"]),
-                "当前总结：{}".format(t["summary"] or ""),
+                "案例卡：{}".format(line) if line else "当前总结：{}".format(t["summary"] or ""),
                 "当前方案：{}".format(t["plan"] or ""),
             ]
             msgs = self.db.thread_messages(t["id"], limit=3)
@@ -346,13 +501,14 @@ class AfterSalesService:
             group_id=msg.group_id, sender_id=msg.sender_id, sender_name=msg.display_name,
             kind="message", raw_text=raw, efb_msg_id=msg.msg_id)
 
-    def _post(self, msg: Incoming, text: str, thread_id: Optional[int]) -> None:
+    def _post(self, msg: Incoming, text: str, thread_id: Optional[int],
+              target_id: Optional[int] = None) -> None:
         if QUOTE_HINT_FOOTER not in text:
             text = text.rstrip() + "\n" + QUOTE_HINT_FOOTER
         self.outbox.post_group(msg.group_id, text)
         self.db.add_record(
             group_id=msg.group_id, sender_id=None, sender_name="AI助理", kind="posted",
-            raw_text=text, thread_id=thread_id)
+            raw_text=text, thread_id=thread_id, target_id=target_id)
         logger.info("Posted assistant text to group %s (thread %s)", msg.group_id, thread_id)
 
 

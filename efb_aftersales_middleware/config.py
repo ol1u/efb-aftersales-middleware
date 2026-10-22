@@ -42,6 +42,7 @@ class AIConfig:
     timeout: int = 15
     proxy: Optional[str] = None
     post_min_confidence: float = 0.6
+    ask_min_confidence: float = 0.4
     prompts: Dict[str, str] = field(default_factory=dict)
 
     @property
@@ -101,6 +102,8 @@ class Config:
             proxy=str(ai_proxy) if ai_proxy else None,
             post_min_confidence=_float(raw_ai.get("post_min_confidence", 0.6),
                                        "ai.post_min_confidence"),
+            ask_min_confidence=_float(raw_ai.get("ask_min_confidence", 0.4),
+                                      "ai.ask_min_confidence"),
             prompts={str(k): str(v) for k, v in ai_prompts.items() if k in ("converse",)},
         )
         return cls(

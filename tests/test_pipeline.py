@@ -36,9 +36,20 @@ class Clock:
         return self.t
 
 
-def result(action, thread_id=None, summary=None, plan=None, question=None, confidence=0.9):
-    return {"action": action, "thread_id": thread_id, "summary": summary, "plan": plan,
-            "question": question, "confidence": confidence}
+EMPTY_CARD = {"customer": "", "phone": "", "order_no": "", "spec": "", "issue": "",
+              "demand": "", "status": "处理中", "facts": []}
+
+
+def result(action, thread_id=None, summary=None, plan=None, question=None, confidence=0.9,
+           card=None, progress=None):
+    if card is None:
+        card = dict(EMPTY_CARD, issue=summary or "")
+    # The old free-text "summary" now surfaces as the update's progress line,
+    # so assertions on it keep working against the incremental post format.
+    if progress is None:
+        progress = summary or ""
+    return {"action": action, "thread_id": thread_id, "card": card, "plan": plan,
+            "progress": progress, "question": question, "confidence": confidence}
 
 
 class FakeAI:
@@ -439,3 +450,88 @@ def test_quote_ask_post_by_record_id_recovers(tmp_path):
     service.handle(incoming("是新问题，电机烧了", quoted_record_id=posted["id"]))
     assert len(outbox.posts) == 2
     assert "结合原消息的总结" in outbox.posts[1][1]
+
+
+def test_case_card_stored_and_summary_assembled(tmp_path):
+    card = {"customer": "王女士", "phone": "13800138000", "order_no": "SF1234567890",
+            "spec": "硅胶 160cm", "issue": "腿上有胶水痕迹", "demand": "换货",
+            "status": "处理中", "facts": ["客户已发照片"]}
+
+    def handler(kwargs):
+        return result("new_problem", card=card, plan="联系厂家换货")
+
+    service, db, outbox = make_env(tmp_path, FakeAI(handler))
+    service.handle(incoming("腿上有胶水，怎么办"))
+    thread = db.recent_threads(GROUP, 10 ** 9)[0]
+    import json as _json
+    stored = _json.loads(thread["card"])
+    assert stored["customer"] == "王女士"
+    assert stored["facts"] == ["客户已发照片"]
+    assert "订单尾号 7890" in thread["summary"]
+    assert "腿上有胶水痕迹" in thread["summary"]
+    assert "诉求：换货" in thread["summary"]
+    assert "订单尾号 7890" in outbox.posts[0][1]
+
+
+def test_quote_excerpt_not_full_order_dump(tmp_path):
+    filler = "收货地址某某省某某市某某区某某路某某号某某小区某某栋某某室，收件人某某某"
+    text = filler + "\n\n客户反馈腿上有胶水，这个怎么处理"
+
+    def handler(kwargs):
+        return result("new_problem", summary="腿上有胶水", plan="先擦拭")
+
+    service, db, outbox = make_env(tmp_path, FakeAI(handler))
+    service.handle(incoming(text))
+    post = outbox.posts[0][1]
+    assert filler not in post
+    assert "腿上有胶水" in post
+
+
+def test_card_match_by_phone_from_another_sender(tmp_path):
+    card = dict(EMPTY_CARD, phone="18472206530", issue="发错货了")
+
+    def handler(kwargs):
+        if "案例卡一致" in kwargs["hint"]:
+            return result("update", summary="厂家确认发错", plan="补发正确款")
+        return result("new_problem", card=card, plan="先核对")
+
+    service, db, outbox = make_env(tmp_path, FakeAI(handler))
+    service.handle(incoming("发错货了，客户电话18472206530"))
+    service.handle(incoming("厂家回了，单号18472206530确实发错了", sender="colleague1", name="小李"))
+    assert db.recent_threads(GROUP, 10 ** 9)[0]["version"] == 2
+    assert len(outbox.posts) == 2
+    assert "【进展】" in outbox.posts[1][1]
+    assert "【问题总结】" not in outbox.posts[1][1]
+
+
+def test_resolution_archives_case_and_notifies(tmp_path):
+    def handler(kwargs):
+        if kwargs["text"].startswith("已经处理好了"):
+            return result("note", thread_id=1)
+        return result("new_problem", summary="关节异响", plan="返厂检修")
+
+    service, db, outbox = make_env(tmp_path, FakeAI(handler))
+    service.handle(incoming("关节有异响"))
+    service.handle(incoming("已经处理好了，客户接受了"))
+    assert db.get_thread(1)["status"] == "resolved"
+    assert db.kb_stats()["n"] == 1
+    assert any("已存入案例库" in text for _, text in outbox.posts)
+
+
+def test_ask_uses_lower_threshold(tmp_path):
+    def handler(kwargs):
+        return result("ask", question="这是新问题还是补充？", confidence=0.45)
+
+    service, db, outbox = make_env(tmp_path, FakeAI(handler))
+    service.handle(incoming("那个弄一下"))
+    assert len(outbox.posts) == 1
+    assert "确认一下" in outbox.posts[0][1]
+
+
+def test_new_problem_still_needs_confidence(tmp_path):
+    def handler(kwargs):
+        return result("new_problem", summary="含糊的问题", plan="方案", confidence=0.45)
+
+    service, db, outbox = make_env(tmp_path, FakeAI(handler))
+    service.handle(incoming("有点问题"))
+    assert outbox.posts == []

@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS threads (
     opener_name TEXT,
     summary TEXT,
     plan TEXT,
+    card TEXT,
     version INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'open',
     created_at INTEGER NOT NULL,
@@ -86,6 +87,9 @@ class Database:
         columns = {row[1] for row in self.conn.execute("PRAGMA table_info(records)")}
         if "thread_id" not in columns:
             self.conn.execute("ALTER TABLE records ADD COLUMN thread_id INTEGER")
+        thread_columns = {row[1] for row in self.conn.execute("PRAGMA table_info(threads)")}
+        if "card" not in thread_columns:
+            self.conn.execute("ALTER TABLE threads ADD COLUMN card TEXT")
 
     def now(self) -> int:
         return int(self.clock())
@@ -140,13 +144,14 @@ class Database:
     # -- threads -----------------------------------------------------------
 
     def create_thread(self, *, group_id: str, opener_id: Optional[str], opener_name: Optional[str],
-                      summary: Optional[str], plan: Optional[str]) -> sqlite3.Row:
+                      summary: Optional[str], plan: Optional[str],
+                      card: Optional[str] = None) -> sqlite3.Row:
         now = self.now()
         with self.lock, self.conn:
             cur = self.conn.execute(
-                "INSERT INTO threads (group_id, opener_id, opener_name, summary, plan, version, status,"
-                " created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, 'open', ?, ?)",
-                (group_id, opener_id, opener_name, summary, plan, now, now))
+                "INSERT INTO threads (group_id, opener_id, opener_name, summary, plan, card, version, status,"
+                " created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 1, 'open', ?, ?)",
+                (group_id, opener_id, opener_name, summary, plan, card, now, now))
             thread_id = cur.lastrowid
         return self.get_thread(thread_id)
 
@@ -154,12 +159,30 @@ class Database:
         with self.lock:
             return self.conn.execute("SELECT * FROM threads WHERE id = ?", (thread_id,)).fetchone()
 
-    def update_thread(self, thread_id: int, summary: Optional[str], plan: Optional[str]) -> sqlite3.Row:
+    def update_thread(self, thread_id: int, summary: Optional[str], plan: Optional[str],
+                      card: Optional[str] = None) -> sqlite3.Row:
+        with self.lock, self.conn:
+            if card is not None:
+                self.conn.execute(
+                    "UPDATE threads SET summary = ?, plan = ?, card = ?, version = version + 1,"
+                    " updated_at = ? WHERE id = ?", (summary, plan, card, self.now(), thread_id))
+            else:
+                self.conn.execute(
+                    "UPDATE threads SET summary = ?, plan = ?, version = version + 1, updated_at = ?"
+                    " WHERE id = ?", (summary, plan, self.now(), thread_id))
+        return self.get_thread(thread_id)
+
+    def resolve_thread(self, thread_id: int) -> None:
         with self.lock, self.conn:
             self.conn.execute(
-                "UPDATE threads SET summary = ?, plan = ?, version = version + 1, updated_at = ?"
-                " WHERE id = ?", (summary, plan, self.now(), thread_id))
-        return self.get_thread(thread_id)
+                "UPDATE threads SET status = 'resolved', updated_at = ? WHERE id = ?",
+                (self.now(), thread_id))
+
+    def reopen_thread(self, thread_id: int) -> None:
+        with self.lock, self.conn:
+            self.conn.execute(
+                "UPDATE threads SET status = 'open', updated_at = ? WHERE id = ? AND status != 'open'",
+                (self.now(), thread_id))
 
     def touch_thread(self, thread_id: int) -> None:
         with self.lock, self.conn:
