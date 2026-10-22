@@ -578,3 +578,16 @@ def test_kb_prefers_distilled_cases(tmp_path):
     found = kb_module.search_cases(db, "腿上有胶水怎么处理")
     assert "标准案例" in found
     assert found.index("标准案例") < found.index("原始记录") or "原始记录" not in found
+
+
+def test_kb_standard_case_single_gram_hit(tmp_path):
+    from efb_aftersales_middleware import kb as kb_module
+    service, db, outbox = make_env(tmp_path, FakeAI(lambda kwargs: result("note")))
+    db.kb_add_messages("distilled-test", [{
+        "chat_key": "d", "sender_name": "标准案例", "sent_at": 1,
+        "text": "标准案例：发错货：客户要求仿真口腔，实际漏做且模具损坏｜处理：协商换头型重新发货｜关键词：错发 漏做"}])
+    db.kb_add_messages("import-raw", [{
+        "chat_key": "r", "sender_name": "原始记录", "sent_at": 2,
+        "text": "昨天那个发错货的单子你看了没，客户催了两次了快点处理一下吧"}])
+    found = kb_module.search_cases(db, "发错货了怎么办")
+    assert "标准案例" in found

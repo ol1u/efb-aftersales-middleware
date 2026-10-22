@@ -119,7 +119,16 @@ def search_cases(db, query: str, max_cases: int = 4, context: int = 3,
 
     scored = sorted(
         ((row, _score(row["text"], terms)) for row in candidates), key=rank)
-    hits = [row for row, score in scored if score >= 2][:max_cases]
+    hits = []
+    for row, score in scored:
+        # Standardised cases are terse and normalised: a single distinctive
+        # 3-gram match (e.g. the category word) is a real hit there, while
+        # raw chat rows need two matches to stay above the noise floor.
+        standard = (row["batch"] or "").startswith(("distilled", "resolved"))
+        if score >= 2 or (standard and score >= 1):
+            hits.append(row)
+        if len(hits) >= max_cases:
+            break
     if not hits:
         return ""
     blocks: List[str] = []
