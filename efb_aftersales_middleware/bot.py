@@ -9,6 +9,7 @@ Commands (Telegram admins, any chat with the bot):
   /setprompt <name> | <text>   replace a mode's preset prompt
   /kb                    knowledge-base statistics
   /tiers                 show the emotion tiers and their authority limits
+  /distill               distil the latest imported batch into standard cases
   /settier <tier> | <text>   replace a tier's authority text
   /threads               list problems currently in flight
 Sending a Telegram export file (result.json) as a document imports it
@@ -128,10 +129,11 @@ class CommandBot:
             span = "，覆盖 {} 至 {}".format(
                 datetime.fromtimestamp(lo).strftime("%Y-%m-%d"),
                 datetime.fromtimestamp(hi).strftime("%Y-%m-%d"))
+        note = "正在后台蒸馏标准案例，完成后用 /kb 查看。" if stats.get("distilling") else ""
         self.client.send_message(
             chat_id,
-            "知识库导入完成：新增 {} 条消息（{} 个会话{}）。库内共 {} 条。".format(
-                stats["count"], len(stats["chats"]), span, stats["total"]),
+            "知识库导入完成：新增 {} 条消息（{} 个会话{}）。库内共 {} 条。{}".format(
+                stats["count"], len(stats["chats"]), span, stats["total"], note),
             thread_id=thread_id)
 
     # -- commands ----------------------------------------------------------
@@ -164,6 +166,8 @@ class CommandBot:
                 return "用法：/settier 档位数字或名称 | 放权说明全文"
             self.service.set_tier_authority(tier, authority)
             return "已更新第{}档【{}】的放权：{}".format(tier, tiers[tier]["name"], authority)
+        if command == "distill":
+            return self._cmd_distill(args)
         if command == "kb":
             stats = self.service.db.kb_stats()
             if not stats["n"]:
@@ -173,7 +177,9 @@ class CommandBot:
                 span = "，覆盖 {} 至 {}".format(
                     datetime.fromtimestamp(stats["lo"]).strftime("%Y-%m-%d"),
                     datetime.fromtimestamp(stats["hi"]).strftime("%Y-%m-%d"))
-            return "知识库共 {} 条历史消息{}。".format(stats["n"], span)
+            standard = self.service.db.kb_standard_count()
+            extra = "其中标准案例 {} 条。".format(standard) if standard else ""
+            return "知识库共 {} 条历史消息{}。{}".format(stats["n"], span, extra)
         if command == "threads":
             lines = []
             for group_id in self.service.config.groups:
@@ -184,6 +190,20 @@ class CommandBot:
         if command == "whereami":
             return "已就绪。发 result.json 文件给我导入知识库；/mode 查看和切换策略模式；/tiers 查看情绪档位与放权。"
         return None
+
+    def _cmd_distill(self, args: str) -> str:
+        if not self.service._distill_available():
+            return "AI 未启用或自动蒸馏已关闭，无法蒸馏。"
+        batch = args or self.service.db.kb_latest_import_batch()
+        if not batch:
+            return "还没有导入过数据，先把 result.json 发给我导入。"
+        rows = self.service.db.kb_messages_by_batch(batch)
+        if not rows:
+            return "找不到批次 {}。".format(batch)
+        threading.Thread(target=self.service._distill_quietly, args=(batch,),
+                         daemon=True, name="aftersales-distill").start()
+        return "开始蒸馏批次 {}（{} 条原始记录），完成后用 /kb 查看标准案例数。".format(
+            batch, len(rows))
 
     def _cmd_tiers(self) -> str:
         tiers = self.service.tiers()

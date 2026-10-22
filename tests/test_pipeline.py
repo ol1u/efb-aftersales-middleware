@@ -53,13 +53,19 @@ def result(action, thread_id=None, summary=None, plan=None, question=None, confi
 
 
 class FakeAI:
-    def __init__(self, handler):
+    def __init__(self, handler, json_handler=None):
         self.handler = handler
+        self.json_handler = json_handler
         self.calls = []
 
     def converse(self, **kwargs):
         self.calls.append(kwargs)
         return self.handler(kwargs)
+
+    def chat_json(self, prompt):
+        if self.json_handler is None:
+            return None
+        return self.json_handler(prompt)
 
 
 def thread_id_for(kwargs, opener_name):
@@ -591,3 +597,57 @@ def test_kb_standard_case_single_gram_hit(tmp_path):
         "text": "昨天那个发错货的单子你看了没，客户催了两次了快点处理一下吧"}])
     found = kb_module.search_cases(db, "发错货了怎么办")
     assert "标准案例" in found
+
+
+def _export_bytes(texts):
+    import json as _json
+    messages = [{"type": "message", "from": "Say", "date": 1730000000 + i * 60,
+                 "text": t} for i, t in enumerate(texts)]
+    return _json.dumps({"name": "t", "messages": messages}, ensure_ascii=False).encode()
+
+
+def test_distill_redaction_and_compose():
+    from efb_aftersales_middleware.distill import compose_case_text, redact
+    assert "13800138000" not in redact("电话13800138000-123")
+    assert "〔电话〕" in redact("电话13800138000-123")
+    text = compose_case_text({
+        "problem": "发音：客户13800138000反映没有发音器",
+        "detail": "王先生订单",
+        "handling": "已安排补发",
+        "keywords": "发声 不出声"})
+    assert "13800138000" not in text
+    assert "王先生" not in text
+    assert text.startswith("标准案例：发音")
+    assert "关键词：发声 不出声" in text
+
+
+def test_distill_batch_end_to_end(tmp_path):
+    import time as _time
+    case = {"problem": "发音：客户反映没有发音器", "detail": "",
+            "handling": "核实后补发发音器", "keywords": "发声 不出声"}
+    ai = FakeAI(lambda kwargs: result("note"),
+                json_handler=lambda prompt: {"cases": [case]})
+    service, db, outbox = make_env(tmp_path, ai)
+    stats = service.import_export(_export_bytes(["客户说没有发音器", "给他补发一个发音器"]), "import-t1")
+    assert stats["count"] == 2
+    assert stats.get("distilling") is True
+    deadline = _time.time() + 5
+    while _time.time() < deadline and db.kb_standard_count() == 0:
+        _time.sleep(0.05)
+    assert db.kb_standard_count() == 1
+    texts = db.kb_standard_texts()
+    assert "标准案例：发音" in texts[0]
+    # Re-running distillation over the same batch adds nothing new.
+    assert service.distill_batch("import-t1") == 0
+
+
+def test_distill_dedupe_against_existing(tmp_path):
+    from efb_aftersales_middleware.distill import dedupe_cases
+    existing = ["标准案例：发音：客户反映没有发音器｜处理：核实后补发发音器"]
+    rows = [{"chat_key": "distilled", "sender_name": "标准案例", "sent_at": 1,
+             "text": "标准案例：发音：客户反映没有发音器｜处理：核实后补发发音器"},
+            {"chat_key": "distilled", "sender_name": "标准案例", "sent_at": 1,
+             "text": "标准案例：开裂：客户反映腿部开裂｜处理：安排返厂维修"}]
+    fresh = dedupe_cases(rows, existing)
+    assert len(fresh) == 1
+    assert "开裂" in fresh[0]["text"]

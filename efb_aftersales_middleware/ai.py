@@ -172,6 +172,10 @@ class DeepSeekClient:
             return None
         return parsed if isinstance(parsed, dict) else None
 
+    def chat_json(self, prompt: str) -> Optional[Dict[str, Any]]:
+        """One JSON-mode chat call with the standard retry (public wrapper)."""
+        return self._chat_json(prompt)
+
     def converse(self, *, mode_name: str, mode_prompt: str, cases: str, threads: str,
                  hint: str, group_name: str, sender_label: str,
                  text: str, tiers: str = "") -> Optional[Dict[str, Any]]:

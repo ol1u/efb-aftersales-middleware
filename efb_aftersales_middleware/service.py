@@ -27,6 +27,7 @@ import threading
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Protocol, Tuple
 
+from . import distill as distill_module
 from . import kb as kb_module
 from .config import Config
 from .db import Database
@@ -299,12 +300,48 @@ class AfterSalesService:
             self.db.kb_add_messages(batch, messages)
         chats = sorted({m["chat_key"] for m in messages})
         stamps = [m["sent_at"] for m in messages if m["sent_at"]]
-        return {
+        result = {
             "count": len(messages),
             "chats": chats,
             "range": (min(stamps), max(stamps)) if stamps else (None, None),
             "total": self.db.kb_stats()["n"],
         }
+        if messages and self._distill_available():
+            threading.Thread(target=self._distill_quietly, args=(batch,),
+                             daemon=True, name="aftersales-distill").start()
+            result["distilling"] = True
+        return result
+
+    # -- distillation ----------------------------------------------------------
+
+    def _distill_available(self) -> bool:
+        return (self.ai is not None and self.config.ai.auto_distill
+                and callable(getattr(self.ai, "chat_json", None)))
+
+    def _distill_quietly(self, batch: str) -> None:
+        try:
+            self.distill_batch(batch)
+        except Exception:
+            logger.exception("distillation failed for batch %s", batch)
+
+    @staticmethod
+    def distilled_name(batch: str) -> str:
+        suffix = batch[len("import-"):] if batch.startswith("import-") else batch
+        return "distilled-" + suffix
+
+    def distill_batch(self, batch: str) -> int:
+        """Distill one raw batch into standard cases; returns the new count."""
+        if not self._distill_available():
+            return 0
+        rows = self.db.kb_messages_by_batch(batch)
+        if not rows:
+            return 0
+        cases = distill_module.distill(self.ai.chat_json, [dict(r) for r in rows])
+        fresh = distill_module.dedupe_cases(cases, self.db.kb_standard_texts())
+        if fresh:
+            self.db.kb_add_messages(self.distilled_name(batch), fresh)
+        logger.info("batch %s distilled: %s new standard cases", batch, len(fresh))
+        return len(fresh)
 
     # -- inbound ---------------------------------------------------------------
 

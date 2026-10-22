@@ -222,6 +222,33 @@ class Database:
                  for m in messages])
         return len(messages)
 
+    def kb_messages_by_batch(self, batch: str) -> List[sqlite3.Row]:
+        with self.lock:
+            return self.conn.execute(
+                "SELECT * FROM kb_messages WHERE batch = ? ORDER BY sent_at, id",
+                (batch,)).fetchall()
+
+    def kb_standard_texts(self) -> List[str]:
+        """Texts of standardised cases (distilled history + resolved threads)."""
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT text FROM kb_messages WHERE batch LIKE 'distilled%'"
+                " OR batch = 'resolved-cases'").fetchall()
+        return [row["text"] for row in rows]
+
+    def kb_standard_count(self) -> int:
+        with self.lock:
+            return self.conn.execute(
+                "SELECT COUNT(*) AS n FROM kb_messages WHERE batch LIKE 'distilled%'"
+                " OR batch = 'resolved-cases'").fetchone()["n"]
+
+    def kb_latest_import_batch(self) -> Optional[str]:
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT batch FROM kb_messages WHERE batch LIKE 'import-%'"
+                " GROUP BY batch ORDER BY MAX(id) DESC LIMIT 1").fetchone()
+        return row["batch"] if row is not None else None
+
     def kb_stats(self) -> sqlite3.Row:
         with self.lock:
             return self.conn.execute("SELECT COUNT(*) AS n, MIN(sent_at) AS lo, MAX(sent_at) AS hi"
