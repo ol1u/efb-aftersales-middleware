@@ -9,6 +9,7 @@ itself are stored as kind ``posted`` so their relayed copies are never
 reprocessed.
 """
 
+import re
 import sqlite3
 import threading
 import time
@@ -299,13 +300,45 @@ class Database:
         delta = incoming[best_len:].lstrip(" \t:：,，;；")
         return (best_row, delta) if delta else None
 
-    def is_posted(self, group_id: str, text: str) -> bool:
-        """True when ``text`` is one of our own formatted posts coming back."""
+    def find_posted_record(self, group_id: str, text: str) -> Optional[sqlite3.Row]:
+        """The posted record whose text matches, when one of our own posts
+        comes back through the group."""
         target = _normalize_text(text)
         if not target:
-            return False
+            return None
         with self.lock:
             rows = self.conn.execute(
-                "SELECT raw_text FROM records WHERE group_id = ? AND kind = 'posted'"
+                "SELECT * FROM records WHERE group_id = ? AND kind = 'posted'"
                 " ORDER BY id DESC LIMIT 300", (group_id,)).fetchall()
-        return any(_normalize_text(row["raw_text"]) == target for row in rows)
+        for row in rows:
+            if _normalize_text(row["raw_text"]) == target:
+                return row
+        return None
+
+    def is_posted(self, group_id: str, text: str) -> bool:
+        """True when ``text`` is one of our own formatted posts coming back."""
+        return self.find_posted_record(group_id, text) is not None
+
+    def find_record_by_msg_id(self, group_id: str, msg_id: str) -> Optional[sqlite3.Row]:
+        """Find the archived record for a WeChat message id (a quote target).
+
+        Compares digit-normalised ids so format differences between the
+        slave's message uid and the quote's svrid do not matter.
+        """
+        wanted = re.sub(r"\D", "", str(msg_id or ""))
+        if not wanted:
+            return None
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT * FROM records WHERE group_id = ? AND efb_msg_id IS NOT NULL"
+                " ORDER BY id DESC LIMIT 500", (group_id,)).fetchall()
+        for row in rows:
+            if re.sub(r"\D", "", str(row["efb_msg_id"])) == wanted:
+                return row
+        return None
+
+    def set_record_msg_id(self, record_id: int, msg_id: str) -> None:
+        with self.lock, self.conn:
+            self.conn.execute(
+                "UPDATE records SET efb_msg_id = ? WHERE id = ? AND efb_msg_id IS NULL",
+                (msg_id, record_id))

@@ -80,6 +80,10 @@ class AfterSalesMiddleware(Middleware):
             return None
         if isinstance(author, SystemChatMember):
             return None
+        target = getattr(message, "target", None)
+        quoted_msg_id = None
+        if target is not None and getattr(target, "uid", None):
+            quoted_msg_id = str(target.uid)
         return Incoming(
             group_id=str(chat.uid),
             group_name=chat.display_name,
@@ -90,4 +94,5 @@ class AfterSalesMiddleware(Middleware):
             msg_type=message.type.name,
             text=message.text or "",
             msg_id=str(message.uid) if message.uid else None,
+            quoted_msg_id=quoted_msg_id,
         )

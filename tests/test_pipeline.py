@@ -89,9 +89,11 @@ def make_env(tmp_path, ai, config=None):
     return service, db, outbox
 
 
-def incoming(text, sender="cust1", name="张三", is_self=False):
+def incoming(text, sender="cust1", name="张三", is_self=False, msg_id=None,
+             quoted_msg_id=None):
     return Incoming(group_id=GROUP, group_name="售后群", sender_id=sender, sender_name=name,
-                    sender_alias=None, is_self=is_self, msg_type="Text", text=text)
+                    sender_alias=None, is_self=is_self, msg_type="Text", text=text,
+                    msg_id=msg_id, quoted_msg_id=quoted_msg_id)
 
 
 # -- conversation ---------------------------------------------------------------
@@ -315,3 +317,48 @@ def test_posts_carry_quote_hint_footer(tmp_path):
         "SELECT raw_text FROM records WHERE kind = 'posted'").fetchall()
     assert len(posted) == 3
     assert all(QUOTE_HINT_FOOTER in (r["raw_text"] or "") for r in posted)
+
+
+# -- quote targets (message.target from the slave) ------------------------------
+
+
+def test_quote_by_msg_id_routes_to_thread(tmp_path):
+    def handler(kwargs):
+        if "引用了问题编号" in kwargs["hint"]:
+            return result("update", thread_id=None, summary="按引用更新", plan="新方案")
+        return result("new_problem", summary="总结：" + kwargs["text"], plan="方案")
+
+    ai = FakeAI(handler)
+    service, db, outbox = make_env(tmp_path, ai)
+    service.handle(incoming(PROBLEM_TEXT, msg_id="1001"))
+    service.handle(incoming("补充一句", quoted_msg_id="1001"))
+    assert len(outbox.posts) == 2
+    assert "按引用更新" in outbox.posts[1][1]
+    thread = db.recent_threads(GROUP, 10 ** 9)[0]
+    assert thread["version"] == 2
+
+
+def test_quote_of_ask_post_recovers_original(tmp_path):
+    original = "ORIGINAL 客户说电机不转了"
+
+    def handler(kwargs):
+        if "提问帖" in kwargs["hint"]:
+            assert original in kwargs["hint"]
+            return result("new_problem", summary="结合原消息的总结", plan="处理方案")
+        return result("ask", question="这是新问题还是补充？")
+
+    ai = FakeAI(handler)
+    service, db, outbox = make_env(tmp_path, ai)
+    service.handle(incoming(original, msg_id="3001"))
+    assert len(outbox.posts) == 1  # the ask post
+    ask_text = outbox.posts[0][1]
+    # the ask post comes back into the group under the owner's name
+    service.handle(incoming(ask_text, sender="wxid_boss", name="老板",
+                            is_self=True, msg_id="3002"))
+    posted = db.find_posted_record(GROUP, ask_text)
+    assert posted["efb_msg_id"] == "3002"  # backfilled on return
+    # the customer answers by quoting the ask post
+    service.handle(incoming("是新问题，电机烧了", quoted_msg_id="3002"))
+    assert len(outbox.posts) == 2
+    assert "结合原消息的总结" in outbox.posts[1][1]
+    assert db.recent_threads(GROUP, 10 ** 9)

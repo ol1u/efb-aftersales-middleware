@@ -62,6 +62,7 @@ class Incoming:
     msg_type: str
     text: str
     msg_id: Optional[str] = None
+    quoted_msg_id: Optional[str] = None
 
     @property
     def display_name(self) -> str:
@@ -153,8 +154,14 @@ class AfterSalesService:
 
     def _process(self, msg: Incoming) -> None:
         raw = msg.text or ""
-        if raw and self.db.is_posted(msg.group_id, raw):
-            return  # Our own post relayed back; never reprocess.
+        if raw:
+            posted = self.db.find_posted_record(msg.group_id, raw)
+            if posted is not None:
+                # Our own post relayed back; never reprocess. Remember its
+                # WeChat message id so later quotes of it can be resolved.
+                if msg.msg_id and not posted["efb_msg_id"]:
+                    self.db.set_record_msg_id(posted["id"], msg.msg_id)
+                return
         if msg.msg_type not in TEXTUAL_TYPES:
             self._archive(msg, raw or "[{}]".format(msg.msg_type))
             return
@@ -216,6 +223,25 @@ class AfterSalesService:
 
     def _trace(self, msg: Incoming, raw: str) -> Tuple[Optional[int], str, str]:
         """Deterministic attribution traces: (thread_id, hint text, content)."""
+        if msg.quoted_msg_id:
+            record = self.db.find_record_by_msg_id(msg.group_id, msg.quoted_msg_id)
+            if record is not None:
+                if record["thread_id"]:
+                    return record["thread_id"], "这条消息引用了问题编号 {} 中的消息。".format(
+                        record["thread_id"]), raw
+                if record["kind"] == "posted":
+                    # One of our posts with no thread (an ask): recover the
+                    # message it asked about so the AI can use the answer.
+                    _, asked_about, _ = split_quote(record["raw_text"] or "")
+                    original = asked_about or (record["raw_text"] or "")
+                    return None, (
+                        "这条消息引用了你之前发出的一条提问帖，你当时是就下面这条消息提问的，"
+                        "对方这条是回答。请结合原消息和回答判断：信息足够就按 new_problem "
+                        "给出总结和方案；仍不足就继续 ask。被提问的原消息：「{}」".format(
+                            original[:600])), raw
+                return None, (
+                    "这条消息引用了下面这条尚未成问题的消息，请结合它判断："
+                    "「{}」".format((record["raw_text"] or "")[:600])), raw
         _, quoted_text, body = split_quote(raw)
         if quoted_text:
             record = self.db.find_record_by_text(msg.group_id, quoted_text)
