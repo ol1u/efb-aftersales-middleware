@@ -85,6 +85,23 @@ def quote_block(name: str, quoted_text: str, body: str) -> str:
     return "「{}：{}」\n{}\n{}".format(name, quoted_text, QUOTE_DIVIDER, body)
 
 
+def _hint_tag(hint: str, quoted_msg_id: Optional[str]) -> str:
+    """Short label for a trace outcome, for the decision log line."""
+    if hint == DUPLICATE_RESEND:
+        return "duplicate"
+    if "提问帖" in hint:
+        return "quote-ask"
+    if "尚未成问题" in hint:
+        return "quote-unanchored"
+    if "引用了问题编号" in hint:
+        return "quote-id" if quoted_msg_id else "quote-text"
+    if "复制了问题编号" in hint:
+        return "copy"
+    if "进行中的问题编号" in hint:
+        return "own-thread"
+    return "none" if not hint else "other"
+
+
 class AfterSalesService:
     def __init__(self, config: Config, db: Database, outbox: Outbox,
                  ai: Optional[AIAssist] = None):
@@ -160,8 +177,11 @@ class AfterSalesService:
             if posted is not None:
                 # Our own post relayed back; never reprocess. Remember its
                 # WeChat message id so later quotes of it can be resolved.
-                if msg.msg_id and not posted["efb_msg_id"]:
+                backfilled = bool(msg.msg_id and not posted["efb_msg_id"])
+                if backfilled:
                     self.db.set_record_msg_id(posted["id"], msg.msg_id)
+                logger.info("own post returned: record=%s msg_id=%s backfilled=%s",
+                            posted["id"], msg.msg_id, backfilled)
                 return
         if msg.msg_type not in TEXTUAL_TYPES:
             self._archive(msg, raw or "[{}]".format(msg.msg_type))
@@ -169,11 +189,16 @@ class AfterSalesService:
 
         hint_thread, hint_text, content = self._trace(msg, raw)
         record = self._archive(msg, raw)
+        logger.info("trace msg=%s quoted=%s kind=%s thread=%s",
+                    msg.msg_id, msg.quoted_msg_id,
+                    _hint_tag(hint_text, msg.quoted_msg_id), hint_thread)
         if hint_text == DUPLICATE_RESEND and hint_thread is not None:
             self.db.set_record_thread(record["id"], hint_thread)
             self.db.touch_thread(hint_thread)
             body = "这条已经处理过了（问题 #{}），是有什么需要补充的吗？".format(hint_thread)
             self._post(msg, quote_block(msg.display_name, raw, body), hint_thread)
+            logger.info("decision msg=%s -> duplicate notice for thread %s",
+                        msg.msg_id, hint_thread)
             return
         if self.ai is None:
             return
@@ -196,8 +221,16 @@ class AfterSalesService:
         except Exception:
             logger.exception("AI converse failed; message kept as archive only")
             return
-        if result is None or result["confidence"] < self.config.ai.post_min_confidence:
+        if result is None:
+            logger.info("decision msg=%s -> silent (no ai result)", msg.msg_id)
             return
+        if result["confidence"] < self.config.ai.post_min_confidence:
+            logger.info("decision msg=%s -> silent (action=%s confidence=%.2f < %.2f)",
+                        msg.msg_id, result["action"], result["confidence"],
+                        self.config.ai.post_min_confidence)
+            return
+        logger.info("decision msg=%s action=%s confidence=%.2f",
+                    msg.msg_id, result["action"], result["confidence"])
 
         action = result["action"]
         if action == "new_problem":

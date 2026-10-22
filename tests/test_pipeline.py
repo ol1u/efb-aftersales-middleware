@@ -379,3 +379,25 @@ def test_exact_resend_gets_already_handled_notice(tmp_path):
     # a resend WITH additions still goes through the copy+append AI path
     service.handle(incoming(PROBLEM_TEXT + " 另外补充：已经拍了视频"))
     assert len(ai.calls) > calls_before
+
+
+def test_decision_logging(tmp_path, caplog):
+    import logging
+    ai = FakeAI(default_handler)
+    service, db, outbox = make_env(tmp_path, ai)
+    with caplog.at_level(logging.INFO, logger="efb_aftersales_middleware.service"):
+        service.handle(incoming(PROBLEM_TEXT, msg_id="5001"))
+    texts = [r.getMessage() for r in caplog.records]
+    assert any("trace msg=5001" in t and "kind=none" in t for t in texts)
+    assert any("action=new_problem" in t for t in texts)
+
+
+def test_low_confidence_silence_is_logged(tmp_path, caplog):
+    import logging
+    ai = FakeAI(lambda kwargs: result("note", confidence=0.3))
+    service, db, outbox = make_env(tmp_path, ai)
+    with caplog.at_level(logging.INFO, logger="efb_aftersales_middleware.service"):
+        service.handle(incoming("随便一句", msg_id="5002"))
+    texts = [r.getMessage() for r in caplog.records]
+    assert any("silent" in t and "confidence=0.30" in t for t in texts)
+    assert not outbox.posts
