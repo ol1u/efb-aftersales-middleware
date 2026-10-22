@@ -651,3 +651,17 @@ def test_distill_dedupe_against_existing(tmp_path):
     fresh = dedupe_cases(rows, existing)
     assert len(fresh) == 1
     assert "开裂" in fresh[0]["text"]
+
+
+def test_cases_command_lists_standard_cases(tmp_path):
+    service, db, outbox = make_env(tmp_path, ai=None)
+    bot = CommandBot(FakeClient(b""), make_config(), service)
+    assert "还没有标准案例" in bot.run_command("cases", "", {"id": 42})
+    db.kb_add_messages("distilled-x", [
+        {"chat_key": "d", "sender_name": "标准案例", "sent_at": i,
+         "text": "标准案例：发音：案例{}｜处理：补发".format(i)} for i in range(10)])
+    page1 = bot.run_command("cases", "", {"id": 42})
+    assert "共 10 条" in page1 and "第 1/2 页" in page1 and "案例0" in page1
+    page2 = bot.run_command("cases", "2", {"id": 42})
+    assert "第 2/2 页" in page2 and "案例8" in page2
+    assert "/cases" in bot.run_command("kb", "", {"id": 42})

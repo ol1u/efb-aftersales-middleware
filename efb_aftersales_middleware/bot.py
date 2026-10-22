@@ -10,6 +10,7 @@ Commands (Telegram admins, any chat with the bot):
   /kb                    knowledge-base statistics
   /tiers                 show the emotion tiers and their authority limits
   /distill               distil the latest imported batch into standard cases
+  /cases [page]          list the standardised cases, page by page
   /settier <tier> | <text>   replace a tier's authority text
   /threads               list problems currently in flight
 Sending a Telegram export file (result.json) as a document imports it
@@ -168,6 +169,8 @@ class CommandBot:
             return "已更新第{}档【{}】的放权：{}".format(tier, tiers[tier]["name"], authority)
         if command == "distill":
             return self._cmd_distill(args)
+        if command == "cases":
+            return self._cmd_cases(args)
         if command == "kb":
             stats = self.service.db.kb_stats()
             if not stats["n"]:
@@ -178,7 +181,7 @@ class CommandBot:
                     datetime.fromtimestamp(stats["lo"]).strftime("%Y-%m-%d"),
                     datetime.fromtimestamp(stats["hi"]).strftime("%Y-%m-%d"))
             standard = self.service.db.kb_standard_count()
-            extra = "其中标准案例 {} 条。".format(standard) if standard else ""
+            extra = "其中标准案例 {} 条，用 /cases 查看内容。".format(standard) if standard else ""
             return "知识库共 {} 条历史消息{}。{}".format(stats["n"], span, extra)
         if command == "threads":
             lines = []
@@ -190,6 +193,25 @@ class CommandBot:
         if command == "whereami":
             return "已就绪。发 result.json 文件给我导入知识库；/mode 查看和切换策略模式；/tiers 查看情绪档位与放权。"
         return None
+
+    def _cmd_cases(self, args: str) -> str:
+        per_page = 8
+        total = self.service.db.kb_standard_count()
+        if not total:
+            return "还没有标准案例。导入数据后会自动蒸馏，也可发新问题等其解决后自动沉淀。"
+        pages = (total + per_page - 1) // per_page
+        try:
+            page = int(args) if args else 1
+        except ValueError:
+            page = 1
+        page = min(max(page, 1), pages)
+        rows = self.service.db.kb_standard_cases(per_page, (page - 1) * per_page)
+        lines = ["标准案例（共 {} 条，第 {}/{} 页）：".format(total, page, pages)]
+        for i, row in enumerate(rows, (page - 1) * per_page + 1):
+            lines.append("{}. {}".format(i, row["text"]))
+        if pages > 1:
+            lines.append("用 /cases 页码 翻页。")
+        return "\n".join(lines)
 
     def _cmd_distill(self, args: str) -> str:
         if not self.service._distill_available():

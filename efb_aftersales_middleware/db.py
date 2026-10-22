@@ -242,6 +242,13 @@ class Database:
                 "SELECT COUNT(*) AS n FROM kb_messages WHERE batch LIKE 'distilled%'"
                 " OR batch = 'resolved-cases'").fetchone()["n"]
 
+    def kb_standard_cases(self, limit: int = 10, offset: int = 0) -> List[sqlite3.Row]:
+        with self.lock:
+            return self.conn.execute(
+                "SELECT * FROM kb_messages WHERE batch LIKE 'distilled%'"
+                " OR batch = 'resolved-cases' ORDER BY id LIMIT ? OFFSET ?",
+                (limit, offset)).fetchall()
+
     def kb_latest_import_batch(self) -> Optional[str]:
         with self.lock:
             row = self.conn.execute(
