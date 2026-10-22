@@ -1,0 +1,41 @@
+# ~/.ehforwarderbot/profiles/ComWeChat/ol1u.aftersales/config.yaml
+
+# 售后 bot 的 token（不是 ETM 的 token）
+bot_token: <redacted>
+
+# ETM 话题群（超级群）的 chat ID
+telegram_group_id: -1001234567890
+
+# 要跟进的微信售后群，以及 ETM 为它创建的 Telegram 话题 ID。
+# 助理的帖子会发到这个话题，经 ETM 以你的微信号转发回群里。
+groups:
+  - wechat_id: "12345678901@chatroom"
+    topic_id: 123
+
+# 可以给售后 bot 发命令、导入知识库文件的 Telegram 用户 ID
+telegram_admins:
+  - 111111111
+
+# 可选：你自己的微信 wxid。你在群里的发言会被标记为群主指示，
+# 与预设策略冲突时以你的指示为准（is_self 的消息也会自动标记）。
+# owner_wxid: wxid_you
+
+# 可选：数据库路径，默认在 EFB 数据目录下 aftersales.db
+# db_path: /home/you/aftersales.db
+
+# 可选：访问 Telegram Bot API 的 HTTP 代理。
+# 如果 ETM 配了 request_kwargs.proxy_url，这里也填同一个地址。
+# proxy: "http://127.0.0.1:7897"
+
+# AI：每条群消息都过一遍。没配好这一段时，中间件只存档、不发言。
+ai:
+  enabled: true
+  # DeepSeek API key；也可以用环境变量 DEEPSEEK_API_KEY 代替
+  api_key: "sk-..."
+  # model: deepseek-flash
+  # 置信度低于这个值就不发言（只存档）
+  # post_min_confidence: 0.6
+  # 自定义主提示词（占位符：{mode_name} {mode_prompt} {cases} {threads}
+  #   {hint} {group_name} {sender_label} {text}）
+  # prompts:
+  #   converse: "..."
