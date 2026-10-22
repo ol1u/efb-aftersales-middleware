@@ -84,6 +84,14 @@ class AfterSalesMiddleware(Middleware):
         quoted_msg_id = None
         if target is not None and getattr(target, "uid", None):
             quoted_msg_id = str(target.uid)
+        quoted_record_id = None
+        if quoted_msg_id:
+            group_id = str(chat.uid)
+            record = self.db.find_record_by_msg_id(group_id, quoted_msg_id)
+            if record is None and master is not None:
+                record = self._resolve_via_master(master, chat, group_id, quoted_msg_id)
+            if record is not None:
+                quoted_record_id = record["id"]
         return Incoming(
             group_id=str(chat.uid),
             group_name=chat.display_name,
@@ -95,4 +103,26 @@ class AfterSalesMiddleware(Middleware):
             text=message.text or "",
             msg_id=str(message.uid) if message.uid else None,
             quoted_msg_id=quoted_msg_id,
+            quoted_record_id=quoted_record_id,
         )
+
+    def _resolve_via_master(self, master, chat, group_id: str, quoted_msg_id: str):
+        """Resolve a quote target the archive does not know.
+
+        The target may be a message the master itself sent (our posts never
+        come back through process_message, so their WeChat ids are missing
+        from the archive). Ask the master what it sent under that id, match
+        the text against the archive, and remember the id for next time.
+        """
+        try:
+            sent = master.get_message_by_id(chat=chat, msg_id=quoted_msg_id)
+        except Exception:
+            return None
+        text = getattr(sent, "text", None) if sent is not None else None
+        if not text:
+            return None
+        record = (self.db.find_posted_record(group_id, text)
+                  or self.db.find_record_by_text(group_id, text))
+        if record is not None and not record["efb_msg_id"]:
+            self.db.set_record_msg_id(record["id"], quoted_msg_id)
+        return record

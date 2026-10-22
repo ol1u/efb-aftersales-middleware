@@ -64,6 +64,7 @@ class Incoming:
     text: str
     msg_id: Optional[str] = None
     quoted_msg_id: Optional[str] = None
+    quoted_record_id: Optional[int] = None
 
     @property
     def display_name(self) -> str:
@@ -189,8 +190,8 @@ class AfterSalesService:
 
         hint_thread, hint_text, content = self._trace(msg, raw)
         record = self._archive(msg, raw)
-        logger.info("trace msg=%s quoted=%s kind=%s thread=%s",
-                    msg.msg_id, msg.quoted_msg_id,
+        logger.info("trace msg=%s quoted=%s qrec=%s kind=%s thread=%s",
+                    msg.msg_id, msg.quoted_msg_id, msg.quoted_record_id,
                     _hint_tag(hint_text, msg.quoted_msg_id), hint_thread)
         if hint_text == DUPLICATE_RESEND and hint_thread is not None:
             self.db.set_record_thread(record["id"], hint_thread)
@@ -263,25 +264,28 @@ class AfterSalesService:
 
     def _trace(self, msg: Incoming, raw: str) -> Tuple[Optional[int], str, str]:
         """Deterministic attribution traces: (thread_id, hint text, content)."""
-        if msg.quoted_msg_id:
+        record = None
+        if msg.quoted_record_id is not None:
+            record = self.db.get_record(msg.quoted_record_id)
+        if record is None and msg.quoted_msg_id:
             record = self.db.find_record_by_msg_id(msg.group_id, msg.quoted_msg_id)
-            if record is not None:
-                if record["thread_id"]:
-                    return record["thread_id"], "这条消息引用了问题编号 {} 中的消息。".format(
-                        record["thread_id"]), raw
-                if record["kind"] == "posted":
-                    # One of our posts with no thread (an ask): recover the
-                    # message it asked about so the AI can use the answer.
-                    _, asked_about, _ = split_quote(record["raw_text"] or "")
-                    original = asked_about or (record["raw_text"] or "")
-                    return None, (
-                        "这条消息引用了你之前发出的一条提问帖，你当时是就下面这条消息提问的，"
-                        "对方这条是回答。请结合原消息和回答判断：信息足够就按 new_problem "
-                        "给出总结和方案；仍不足就继续 ask。被提问的原消息：「{}」".format(
-                            original[:600])), raw
+        if record is not None:
+            if record["thread_id"]:
+                return record["thread_id"], "这条消息引用了问题编号 {} 中的消息。".format(
+                    record["thread_id"]), raw
+            if record["kind"] == "posted":
+                # One of our posts with no thread (an ask): recover the
+                # message it asked about so the AI can use the answer.
+                _, asked_about, _ = split_quote(record["raw_text"] or "")
+                original = asked_about or (record["raw_text"] or "")
                 return None, (
-                    "这条消息引用了下面这条尚未成问题的消息，请结合它判断："
-                    "「{}」".format((record["raw_text"] or "")[:600])), raw
+                    "这条消息引用了你之前发出的一条提问帖，你当时是就下面这条消息提问的，"
+                    "对方这条是回答。请结合原消息和回答判断：信息足够就按 new_problem "
+                    "给出总结和方案；仍不足就继续 ask。被提问的原消息：「{}」".format(
+                        original[:600])), raw
+            return None, (
+                "这条消息引用了下面这条尚未成问题的消息，请结合它判断："
+                "「{}」".format((record["raw_text"] or "")[:600])), raw
         _, quoted_text, body = split_quote(raw)
         if quoted_text:
             record = self.db.find_record_by_text(msg.group_id, quoted_text)

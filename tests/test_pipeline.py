@@ -90,10 +90,11 @@ def make_env(tmp_path, ai, config=None):
 
 
 def incoming(text, sender="cust1", name="张三", is_self=False, msg_id=None,
-             quoted_msg_id=None):
+             quoted_msg_id=None, quoted_record_id=None):
     return Incoming(group_id=GROUP, group_name="售后群", sender_id=sender, sender_name=name,
                     sender_alias=None, is_self=is_self, msg_type="Text", text=text,
-                    msg_id=msg_id, quoted_msg_id=quoted_msg_id)
+                    msg_id=msg_id, quoted_msg_id=quoted_msg_id,
+                    quoted_record_id=quoted_record_id)
 
 
 # -- conversation ---------------------------------------------------------------
@@ -401,3 +402,40 @@ def test_low_confidence_silence_is_logged(tmp_path, caplog):
     texts = [r.getMessage() for r in caplog.records]
     assert any("silent" in t and "confidence=0.30" in t for t in texts)
     assert not outbox.posts
+
+
+def test_quote_by_record_id_routes_to_thread(tmp_path):
+    def handler(kwargs):
+        if "引用了问题编号" in kwargs["hint"]:
+            return result("update", thread_id=None, summary="按引用更新", plan="新方案")
+        return result("new_problem", summary="总结：" + kwargs["text"], plan="方案")
+
+    ai = FakeAI(handler)
+    service, db, outbox = make_env(tmp_path, ai)
+    service.handle(incoming(PROBLEM_TEXT, msg_id="6001"))
+    opener = db.find_record_by_msg_id(GROUP, "6001")
+    assert opener is not None
+    service.handle(incoming("补充一句", quoted_record_id=opener["id"]))
+    assert len(outbox.posts) == 2
+    assert "按引用更新" in outbox.posts[1][1]
+    assert db.recent_threads(GROUP, 10 ** 9)[0]["version"] == 2
+
+
+def test_quote_ask_post_by_record_id_recovers(tmp_path):
+    original = "ORIGINAL 客户说电机不转了"
+
+    def handler(kwargs):
+        if "提问帖" in kwargs["hint"]:
+            assert original in kwargs["hint"]
+            return result("new_problem", summary="结合原消息的总结", plan="处理方案")
+        return result("ask", question="这是新问题还是补充？")
+
+    ai = FakeAI(handler)
+    service, db, outbox = make_env(tmp_path, ai)
+    service.handle(incoming(original, msg_id="7001"))
+    assert len(outbox.posts) == 1  # the ask post
+    posted = db.find_posted_record(GROUP, outbox.posts[0][1])
+    assert posted is not None
+    service.handle(incoming("是新问题，电机烧了", quoted_record_id=posted["id"]))
+    assert len(outbox.posts) == 2
+    assert "结合原消息的总结" in outbox.posts[1][1]
