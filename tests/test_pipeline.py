@@ -36,8 +36,8 @@ class Clock:
         return self.t
 
 
-EMPTY_CARD = {"customer": "", "phone": "", "order_no": "", "spec": "", "issue": "",
-              "demand": "", "status": "处理中", "facts": []}
+EMPTY_CARD = {"customer": "", "phone": "", "order_no": "", "platform": "", "emotion": "",
+              "spec": "", "issue": "", "demand": "", "status": "处理中", "facts": []}
 
 
 def result(action, thread_id=None, summary=None, plan=None, question=None, confidence=0.9,
@@ -535,3 +535,46 @@ def test_new_problem_still_needs_confidence(tmp_path):
     service, db, outbox = make_env(tmp_path, FakeAI(handler))
     service.handle(incoming("有点问题"))
     assert outbox.posts == []
+
+
+def test_tiers_defaults_and_update(tmp_path):
+    service, db, outbox = make_env(tmp_path, FakeAI(lambda kwargs: result("note")))
+    tiers = service.tiers()
+    assert set(tiers) == {"1", "2", "3", "4"}
+    assert tiers["4"]["stance"] == "激进"
+    assert "第3档" in service.tiers_text()
+    assert service.set_tier_authority("3", "可退一半") is True
+    assert service.tiers()["3"]["authority"] == "可退一半"
+    assert service.set_tier_authority("9", "x") is False
+
+
+def test_card_platform_emotion_and_tiers_context(tmp_path):
+    seen = {}
+    card = dict(EMPTY_CARD, platform="拼多多", emotion="愤怒", issue="发错货")
+
+    def handler(kwargs):
+        seen.update(kwargs)
+        return result("new_problem", card=card, plan="先核实")
+
+    service, db, outbox = make_env(tmp_path, FakeAI(handler))
+    service.handle(incoming("拼多多的单发错货了，客户很生气"))
+    import json as _json
+    stored = _json.loads(db.recent_threads(GROUP, 10 ** 9)[0]["card"])
+    assert stored["platform"] == "拼多多"
+    assert stored["emotion"] == "愤怒"
+    assert "第4档" in seen["tiers"]
+    assert "放权" in seen["tiers"]
+
+
+def test_kb_prefers_distilled_cases(tmp_path):
+    from efb_aftersales_middleware import kb as kb_module
+    service, db, outbox = make_env(tmp_path, FakeAI(lambda kwargs: result("note")))
+    db.kb_add_messages("distilled-test", [{
+        "chat_key": "d", "sender_name": "标准案例", "sent_at": 1,
+        "text": "标准案例：腿上有胶水痕迹，用酒精棉擦拭即可去除"}])
+    db.kb_add_messages("import-raw", [{
+        "chat_key": "r", "sender_name": "原始记录", "sent_at": 2,
+        "text": "那个腿上有胶水啊咋办呢问了下要用酒精擦"}])
+    found = kb_module.search_cases(db, "腿上有胶水怎么处理")
+    assert "标准案例" in found
+    assert found.index("标准案例") < found.index("原始记录") or "原始记录" not in found

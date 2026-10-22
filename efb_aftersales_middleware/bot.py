@@ -8,6 +8,8 @@ Commands (Telegram admins, any chat with the bot):
   /prompt <name>         show a mode's preset prompt
   /setprompt <name> | <text>   replace a mode's preset prompt
   /kb                    knowledge-base statistics
+  /tiers                 show the emotion tiers and their authority limits
+  /settier <tier> | <text>   replace a tier's authority text
   /threads               list problems currently in flight
 Sending a Telegram export file (result.json) as a document imports it
 into the knowledge base.
@@ -149,6 +151,19 @@ class CommandBot:
                 return "用法：/setprompt 模式名 | prompt 全文"
             self.service.set_mode_prompt(name, prompt)
             return "已更新模式【{}】的预设 prompt。".format(name)
+        if command == "tiers":
+            return self._cmd_tiers()
+        if command == "settier":
+            tier, sep, authority = args.partition("|")
+            tier, authority = tier.strip(), authority.strip()
+            tiers = self.service.tiers()
+            if tier not in tiers:
+                by_name = {t["name"]: key for key, t in tiers.items()}
+                tier = by_name.get(tier, tier)
+            if not sep or not authority or tier not in tiers:
+                return "用法：/settier 档位数字或名称 | 放权说明全文"
+            self.service.set_tier_authority(tier, authority)
+            return "已更新第{}档【{}】的放权：{}".format(tier, tiers[tier]["name"], authority)
         if command == "kb":
             stats = self.service.db.kb_stats()
             if not stats["n"]:
@@ -167,8 +182,16 @@ class CommandBot:
                         t["id"], t["opener_name"], (t["summary"] or "")[:40], t["version"]))
             return "\n".join(lines) if lines else "当前没有进行中的问题。"
         if command == "whereami":
-            return "已就绪。发 result.json 文件给我导入知识库；/mode 查看和切换策略模式。"
+            return "已就绪。发 result.json 文件给我导入知识库；/mode 查看和切换策略模式；/tiers 查看情绪档位与放权。"
         return None
+
+    def _cmd_tiers(self) -> str:
+        tiers = self.service.tiers()
+        lines = ["情绪档位与放权（用 /settier 档位 | 放权说明 修改）："]
+        for key in sorted(tiers):
+            t = tiers[key]
+            lines.append("第{}档【{}】（{}）：{}".format(key, t["name"], t["stance"], t["authority"]))
+        return "\n".join(lines)
 
     def _cmd_mode(self, args: str) -> str:
         modes = self.service.modes()

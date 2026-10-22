@@ -108,9 +108,17 @@ def search_cases(db, query: str, max_cases: int = 4, context: int = 3,
     if not terms:
         return ""
     candidates = db.kb_candidates(terms)
+
+    def rank(pair):
+        row, score = pair
+        # Standardised cases (AI-distilled history, auto-archived resolved
+        # threads) outrank raw imported chat logs at equal relevance.
+        batch = row["batch"] or ""
+        boost = 3 if batch.startswith(("distilled", "resolved")) else 0
+        return (-(score + boost), -row["id"])
+
     scored = sorted(
-        ((row, _score(row["text"], terms)) for row in candidates),
-        key=lambda pair: (-pair[1], -pair[0]["id"]))
+        ((row, _score(row["text"], terms)) for row in candidates), key=rank)
     hits = [row for row, score in scored if score >= 2][:max_cases]
     if not hits:
         return ""

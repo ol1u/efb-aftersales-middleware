@@ -39,7 +39,7 @@ DEFAULT_CONVERSE_PROMPT = """你是一个微信售后群里的智能助理，以
 - ask：分不清属于哪个问题、是补充还是新问题、或信息不足以判断 —— 给出一句简短的提问，向发送者确认。
 
 案例卡（card）：new_problem 和 update 时必须给出该问题目前的完整卡片，在上下文已有卡片的基础上更新；没有的信息留空字符串，绝不编造。
-- customer：客户称呼；phone：电话；order_no：订单号或运单号；spec：规格一句话（30 字内）；issue：问题一句话（30 字内）；demand：客户诉求（15 字内）；status：只能是 待核实、处理中、等客户、已解决 之一；facts：已确认事实的数组，每条 20 字内、最多 6 条，只记被确认过的（核对结果、客户答复、已发出的处理），不记猜测。
+- customer：客户称呼；phone：电话；order_no：订单号或运单号；platform：订单平台（淘宝、拼多多、抖音、京东、微信私域等，消息里提不到就留空）；emotion：客户当前情绪档位名称（平稳、不满、愤怒、激烈，按下面的档位表判定）；spec：规格一句话（30 字内）；issue：问题一句话（30 字内）；demand：客户诉求（15 字内）；status：只能是 待核实、处理中、等客户、已解决 之一；facts：已确认事实的数组，每条 20 字内、最多 6 条，只记被确认过的（核对结果、客户答复、已发出的处理），不记猜测。
 
 篇幅纪律（严格遵守，群里看的人很忙）：
 - plan：1 到 3 条，每条一行、40 字内，写清"谁做什么"；不要话术全文，不要安抚、登记、时限这类套话，除非是这个单子特有的动作。
@@ -48,15 +48,21 @@ DEFAULT_CONVERSE_PROMPT = """你是一个微信售后群里的智能助理，以
 
 规则：
 - 只写已确认的信息，不编造规格、订单等细节；缺的关键信息用 ask 去问。
+- 新问题不知道订单平台时，优先用 ask 问清，一句话同时确认平台和客户情绪（例如：这是哪个平台的订单？客户现在情绪怎么样？）。
+- 方案不得超出客户情绪档位对应的放权；确实需要超出时，在 plan 里明确写"需老板确认"并给出建议额度。
+- 拼多多、抖音这类平台投诉代价高：同等情绪下，方案优先取放权上限。
 - 方案要结合下面的当前策略和历史相似案例。
 - 标记为[群主]的发言是老板本人的指示：与预设策略冲突时以他的指示为准，并体现在方案里。
 - 对方纠正时（"不是X，是Y"这类），以纠正后的信息为准更新卡片。
 
 只输出一个 JSON 对象，不要任何其他文字：
-{{"action": "new_problem"、"update"、"note" 或 "ask", "thread_id": 归属的问题编号（new_problem 时填 null）, "card": {{"customer": "", "phone": "", "order_no": "", "spec": "", "issue": "", "demand": "", "status": "", "facts": []}}, "plan": "建议方案（new_problem/update 时必填，1-3 条短句，每行一条）", "progress": "本轮进展（update 时必填，一句话）", "question": "要问对方的问题（ask 时必填）", "confidence": 0 到 1 的小数}}
+{{"action": "new_problem"、"update"、"note" 或 "ask", "thread_id": 归属的问题编号（new_problem 时填 null）, "card": {{"customer": "", "phone": "", "order_no": "", "platform": "", "emotion": "", "spec": "", "issue": "", "demand": "", "status": "", "facts": []}}, "plan": "建议方案（new_problem/update 时必填，1-3 条短句，每行一条）", "progress": "本轮进展（update 时必填，一句话）", "question": "要问对方的问题（ask 时必填）", "confidence": 0 到 1 的小数}}
 
 当前策略（模式：{mode_name}）：
 {mode_prompt}
+
+情绪档位与放权（emotion 字段填档位名称）：
+{tiers}
 
 历史相似案例（供参考，不要照抄与本问题无关的内容）：
 {cases}
@@ -94,7 +100,7 @@ def _clean(value: Any, limit: int) -> Optional[str]:
 
 
 _CARD_LIMITS = {"customer": 20, "phone": 24, "order_no": 32, "spec": 60,
-                "issue": 60, "demand": 30, "status": 10}
+                "issue": 60, "demand": 30, "status": 10, "platform": 12, "emotion": 6}
 _CARD_STATUSES = ("待核实", "处理中", "等客户", "已解决")
 
 
@@ -168,10 +174,10 @@ class DeepSeekClient:
 
     def converse(self, *, mode_name: str, mode_prompt: str, cases: str, threads: str,
                  hint: str, group_name: str, sender_label: str,
-                 text: str) -> Optional[Dict[str, Any]]:
+                 text: str, tiers: str = "") -> Optional[Dict[str, Any]]:
         """Return {action, thread_id, card, plan, progress, question, confidence}."""
         prompt = _render(self.prompts.get("converse") or DEFAULT_CONVERSE_PROMPT,
-                         mode_name=mode_name, mode_prompt=mode_prompt,
+                         mode_name=mode_name, mode_prompt=mode_prompt, tiers=tiers or "（无）",
                          cases=cases or "（暂无）", threads=threads or "（暂无）",
                          hint=hint or "（无）", group_name=group_name,
                          sender_label=sender_label, text=text)

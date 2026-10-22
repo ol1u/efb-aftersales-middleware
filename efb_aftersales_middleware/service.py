@@ -52,6 +52,19 @@ DEFAULT_MODES: Dict[str, str] = {
 }
 _MODES_KEY = "modes_v1"
 
+_TIERS_KEY = "emotion_tiers"
+
+DEFAULT_TIERS: Dict[str, Dict[str, str]] = {
+    "1": {"name": "平稳", "stance": "温和", "signals": "语气正常，咨询或小问题",
+          "authority": "不额外让步，按正常流程：核实问题、给明确处理时限。"},
+    "2": {"name": "不满", "stance": "温和", "signals": "抱怨、催促、语气变差",
+          "authority": "可送小礼品或耗材安抚、可免邮补件；不退款、不折价。"},
+    "3": {"name": "愤怒", "stance": "激进", "signals": "明确生气，提到差评、投诉",
+          "authority": "可部分退款或折价（不超过订单金额的 30%）、可补发且旧件不退回；超出此范围须请示老板。"},
+    "4": {"name": "激烈", "stance": "激进", "signals": "威胁平台投诉或曝光、已经差评、扬言退货退款",
+          "authority": "可全额退款、退货运费由我方承担、额外补偿不超过 100 元；超出此范围须请示老板。"},
+}
+
 
 @dataclass
 class Incoming:
@@ -79,7 +92,7 @@ class Outbox(Protocol):
 class AIAssist(Protocol):
     def converse(self, *, mode_name: str, mode_prompt: str, cases: str, threads: str,
                  hint: str, group_name: str, sender_label: str,
-                 text: str) -> Optional[Dict[str, Any]]: ...
+                 text: str, tiers: str = "") -> Optional[Dict[str, Any]]: ...
 
 
 def quote_block(name: str, quoted_text: str, body: str) -> str:
@@ -107,8 +120,9 @@ def _hint_tag(hint: str, quoted_msg_id: Optional[str]) -> str:
 
 
 
-EMPTY_CARD: Dict[str, Any] = {"customer": "", "phone": "", "order_no": "", "spec": "",
-                              "issue": "", "demand": "", "status": "", "facts": []}
+EMPTY_CARD: Dict[str, Any] = {"customer": "", "phone": "", "order_no": "", "platform": "",
+                              "emotion": "", "spec": "", "issue": "", "demand": "",
+                              "status": "", "facts": []}
 
 RESOLUTION_SIGNALS = ("已解决", "解决了", "处理好了", "搞定了", "客户接受了", "客户同意了",
                       "已补发", "已退款", "已换新", "没问题了", "已经处理好")
@@ -165,8 +179,8 @@ def card_line(card: Dict[str, Any]) -> str:
     """Compact one-line rendering of a card for the AI context."""
     fields = []
     for key, label in (("customer", "客户"), ("phone", "电话"), ("order_no", "订单"),
-                       ("spec", "规格"), ("issue", "问题"), ("demand", "诉求"),
-                       ("status", "状态")):
+                       ("platform", "平台"), ("spec", "规格"), ("issue", "问题"),
+                       ("demand", "诉求"), ("emotion", "情绪"), ("status", "状态")):
         if card.get(key):
             fields.append("{}：{}".format(label, card[key]))
     line = "｜".join(fields)
@@ -242,6 +256,41 @@ class AfterSalesService:
         state["modes"][name] = prompt
         self.db.set_setting(_MODES_KEY, json.dumps(state, ensure_ascii=False))
 
+    # -- emotion tiers -------------------------------------------------------
+
+    def _tiers_state(self) -> Dict[str, Any]:
+        raw = self.db.get_setting(_TIERS_KEY)
+        if raw:
+            try:
+                state = json.loads(raw)
+                if isinstance(state, dict) and state.get("tiers"):
+                    return state
+            except ValueError:
+                pass
+        state = {"tiers": {k: dict(v) for k, v in DEFAULT_TIERS.items()}}
+        self.db.set_setting(_TIERS_KEY, json.dumps(state, ensure_ascii=False))
+        return state
+
+    def tiers(self) -> Dict[str, Dict[str, str]]:
+        return self._tiers_state()["tiers"]
+
+    def tiers_text(self) -> str:
+        lines = []
+        tiers = self.tiers()
+        for key in sorted(tiers):
+            t = tiers[key]
+            lines.append("第{}档【{}】（{}）：信号——{}；放权——{}".format(
+                key, t["name"], t["stance"], t["signals"], t["authority"]))
+        return "\n".join(lines)
+
+    def set_tier_authority(self, tier: str, authority: str) -> bool:
+        state = self._tiers_state()
+        if tier not in state["tiers"]:
+            return False
+        state["tiers"][tier]["authority"] = authority
+        self.db.set_setting(_TIERS_KEY, json.dumps(state, ensure_ascii=False))
+        return True
+
     # -- knowledge base --------------------------------------------------------
 
     def import_export(self, data: bytes, batch: str) -> Dict[str, Any]:
@@ -310,7 +359,7 @@ class AfterSalesService:
             sender_label += " [群主]"
         try:
             result = self.ai.converse(
-                mode_name=mode_name, mode_prompt=mode_prompt, cases=cases,
+                mode_name=mode_name, mode_prompt=mode_prompt, tiers=self.tiers_text(), cases=cases,
                 threads=self._threads_text(threads), hint=hint_text,
                 group_name=msg.group_name, sender_label=sender_label, text=content)
         except Exception:
