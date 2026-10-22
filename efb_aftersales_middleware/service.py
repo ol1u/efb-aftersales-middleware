@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 TEXTUAL_TYPES = {"Text", "Link"}
 QUOTE_DIVIDER = " - - - - - - - - - - - - - - - "
+QUOTE_HINT_FOOTER = "（补充或纠正时，请引用本条消息回复，我能准确对应到这个问题。）"
 THREAD_WINDOW_SECONDS = 72 * 3600
 
 DEFAULT_MODES: Dict[str, str] = {
@@ -270,6 +271,8 @@ class AfterSalesService:
             kind="message", raw_text=raw, efb_msg_id=msg.msg_id)
 
     def _post(self, msg: Incoming, text: str, thread_id: Optional[int]) -> None:
+        if QUOTE_HINT_FOOTER not in text:
+            text = text.rstrip() + "\n" + QUOTE_HINT_FOOTER
         self.outbox.post_group(msg.group_id, text)
         self.db.add_record(
             group_id=msg.group_id, sender_id=None, sender_name="AI助理", kind="posted",

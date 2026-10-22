@@ -14,7 +14,7 @@ from efb_aftersales_middleware.bot import CommandBot
 from efb_aftersales_middleware.config import Config
 from efb_aftersales_middleware.db import Database
 from efb_aftersales_middleware.kb import parse_export, search_cases
-from efb_aftersales_middleware.service import AfterSalesService, Incoming
+from efb_aftersales_middleware.service import AfterSalesService, Incoming, QUOTE_HINT_FOOTER
 
 GROUP = "123@chatroom"
 PROBLEM_TEXT = "我的手臂坏了，抬不起来，订单号 2026102012345678"
@@ -299,3 +299,19 @@ def test_to_incoming_group_message(monkeypatch):
     assert res is not None
     assert res.group_id == GROUP
     assert res.display_name == "张总"
+
+
+def test_posts_carry_quote_hint_footer(tmp_path):
+    ai = FakeAI(default_handler)
+    service, db, outbox = make_env(tmp_path, ai)
+    service.handle(incoming(PROBLEM_TEXT))                 # new_problem post
+    service.handle(incoming("不对，是左臂，补充一下"))        # update post
+    service.handle(incoming("在吗"))                         # ask post
+    assert len(outbox.posts) == 3
+    for _, post in outbox.posts:
+        assert post.rstrip().endswith(QUOTE_HINT_FOOTER)
+    # the archived copy carries the footer too, so quotes of it still match
+    posted = db.conn.execute(
+        "SELECT raw_text FROM records WHERE kind = 'posted'").fetchall()
+    assert len(posted) == 3
+    assert all(QUOTE_HINT_FOOTER in (r["raw_text"] or "") for r in posted)
