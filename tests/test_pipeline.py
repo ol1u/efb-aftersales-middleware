@@ -665,3 +665,55 @@ def test_cases_command_lists_standard_cases(tmp_path):
     page2 = bot.run_command("cases", "2", {"id": 42})
     assert "第 2/2 页" in page2 and "案例8" in page2
     assert "/cases" in bot.run_command("kb", "", {"id": 42})
+
+
+def _gate_handler(plan, **card_extra):
+    def handler(kwargs):
+        card = dict(EMPTY_CARD, issue="加热无效果", **card_extra)
+        return result("new_problem", plan=plan, card=card)
+    return handler
+
+
+def test_no_return_gate_asks_amount_when_unknown(tmp_path):
+    ai = FakeAI(_gate_handler("补发新件，旧件不用寄回", platform="淘宝"))
+    service, db, outbox = make_env(tmp_path, ai)
+    service.handle(incoming("加热没效果，客户要换新"))
+    assert len(outbox.posts) == 1
+    post = outbox.posts[0][1]
+    assert "销售额是多少" in post and "哪个平台" not in post
+    assert "补发新件" not in post
+
+
+def test_no_return_gate_merges_platform_question(tmp_path):
+    ai = FakeAI(_gate_handler("全额退款，不用退货"))
+    service, db, outbox = make_env(tmp_path, ai)
+    service.handle(incoming("客户要求退货退款"))
+    post = outbox.posts[0][1]
+    assert "哪个平台" in post and "销售额是多少" in post
+
+
+def test_no_return_gate_allows_under_1000(tmp_path):
+    ai = FakeAI(_gate_handler("补发新件，旧件不用寄回", platform="淘宝", amount="800"))
+    service, db, outbox = make_env(tmp_path, ai)
+    service.handle(incoming("小件坏了要换新"))
+    post = outbox.posts[0][1]
+    assert "【建议方案】" in post and "补发新件" in post and "老板确认" not in post
+
+
+def test_no_return_gate_annotates_over_1000(tmp_path):
+    ai = FakeAI(_gate_handler("补发新件，旧件不用寄回", platform="淘宝", amount="1680"))
+    service, db, outbox = make_env(tmp_path, ai)
+    service.handle(incoming("大件坏了要换新"))
+    post = outbox.posts[0][1]
+    assert "补发新件" in post and "1680" in post and "需老板确认" in post
+
+
+def test_no_return_helpers():
+    from efb_aftersales_middleware.service import _card_amount, _no_return_hit
+    assert _no_return_hit("先寄回旧件，验货后退款") is False
+    assert _no_return_hit("换新不收回旧件") is False  # phrasing not covered, by design
+    assert _no_return_hit("旧件无需寄回，直接补发") is True
+    assert _card_amount({"amount": "1,280"}) == 1280.0
+    assert _card_amount({"amount": "1.2万"}) == 12000.0
+    assert _card_amount({"amount": ""}) is None
+    assert _card_amount({}) is None

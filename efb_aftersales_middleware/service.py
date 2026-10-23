@@ -121,7 +121,7 @@ def _hint_tag(hint: str, quoted_msg_id: Optional[str]) -> str:
 
 
 
-EMPTY_CARD: Dict[str, Any] = {"customer": "", "phone": "", "order_no": "", "platform": "",
+EMPTY_CARD: Dict[str, Any] = {"customer": "", "phone": "", "order_no": "", "platform": "", "amount": "",
                               "emotion": "", "spec": "", "issue": "", "demand": "",
                               "status": "", "facts": []}
 
@@ -149,6 +149,32 @@ def _money_gate_hit(plan: Optional[str]) -> bool:
                 return True
             start = idx + len(keyword)
     return False
+
+
+NO_RETURN_KEYWORDS = ("不寄回", "不用寄回", "无需寄回", "不必寄回", "免寄回",
+                      "不退回", "不用退回", "无需退回",
+                      "不退货", "不用退货", "无需退货", "旧件不退", "旧件自留")
+NO_RETURN_AMOUNT_LIMIT = 1000.0
+NO_RETURN_ASK = "这单的销售额是多少？"
+NO_RETURN_ASK_WITH_PLATFORM = "这是哪个平台的订单？这单销售额是多少？客户现在情绪怎么样？"
+
+
+def _no_return_hit(plan):
+    """True when a plan gives up the goods as well as the money (no return)."""
+    text = plan or ""
+    return any(keyword in text for keyword in NO_RETURN_KEYWORDS)
+
+
+def _card_amount(card):
+    """Parse the card's sales amount (CNY); None when unknown/unparseable."""
+    raw = str((card or {}).get("amount") or "").replace(",", "").strip()
+    if not raw:
+        return None
+    match = re.search(r"(\d+(?:\.\d+)?)\s*(万)?", raw)
+    if not match:
+        return None
+    value = float(match.group(1))
+    return value * 10000 if match.group(2) else value
 
 
 def parse_card(raw: Optional[str]) -> Dict[str, Any]:
@@ -193,6 +219,8 @@ def assemble_summary(card: Dict[str, Any]) -> str:
         bits.append(card["spec"])
     if card.get("issue"):
         bits.append(card["issue"])
+    if card.get("amount"):
+        bits.append("销售额：" + str(card["amount"]))
     if card.get("demand"):
         bits.append("诉求：" + card["demand"])
     return "；".join(bits) or "（信息待补充）"
@@ -202,7 +230,7 @@ def card_line(card: Dict[str, Any]) -> str:
     """Compact one-line rendering of a card for the AI context."""
     fields = []
     for key, label in (("customer", "客户"), ("phone", "电话"), ("order_no", "订单"),
-                       ("platform", "平台"), ("spec", "规格"), ("issue", "问题"),
+                       ("platform", "平台"), ("amount", "销售额"), ("spec", "规格"), ("issue", "问题"),
                        ("demand", "诉求"), ("emotion", "情绪"), ("status", "状态")):
         if card.get(key):
             fields.append("{}：{}".format(label, card[key]))
@@ -427,6 +455,20 @@ class AfterSalesService:
         if result is None:
             logger.info("decision msg=%s -> silent (no ai result)", msg.msg_id)
             return
+        if result.get("action") in ("new_problem", "update") and _no_return_hit(result.get("plan")):
+            amount = _card_amount(result.get("card"))
+            if amount is None:
+                platform_known = bool(str((result.get("card") or {}).get("platform") or "").strip())
+                logger.info("decision msg=%s -> no-return gate: amount unknown; forced ask", msg.msg_id)
+                result["action"] = "ask"
+                result["question"] = (NO_RETURN_ASK if platform_known
+                                      else NO_RETURN_ASK_WITH_PLATFORM)
+                result["confidence"] = 1.0
+            elif amount > NO_RETURN_AMOUNT_LIMIT:
+                logger.info("decision msg=%s -> no-return gate: amount %g over limit; annotated",
+                            msg.msg_id, amount)
+                result["plan"] = (result.get("plan") or "") + \
+                    "\n⚠ 销售额{}元超1000元：不寄回旧件需老板确认。".format("%g" % amount)
         if (result.get("action") == "new_problem"
                 and not str((result.get("card") or {}).get("platform") or "").strip()
                 and _money_gate_hit(result.get("plan"))):
