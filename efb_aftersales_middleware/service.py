@@ -128,6 +128,28 @@ EMPTY_CARD: Dict[str, Any] = {"customer": "", "phone": "", "order_no": "", "plat
 RESOLUTION_SIGNALS = ("已解决", "解决了", "处理好了", "搞定了", "客户接受了", "客户同意了",
                       "已补发", "已退款", "已换新", "没问题了", "已经处理好")
 
+MONEY_GATE_KEYWORDS = ("退款", "退货", "退换", "补偿", "补发", "赔付", "赔偿", "运费")
+MONEY_GATE_QUESTION = "这是哪个平台的订单？客户现在情绪怎么样？"
+
+
+def _money_gate_hit(plan: Optional[str]) -> bool:
+    """True when a proposed plan commits to a money-related remedy.
+
+    A keyword immediately negated (不退款、无补偿…) is advice against that
+    remedy, not a commitment to spend money, so it does not trip the gate.
+    """
+    text = plan or ""
+    for keyword in MONEY_GATE_KEYWORDS:
+        start = 0
+        while True:
+            idx = text.find(keyword, start)
+            if idx < 0:
+                break
+            if idx == 0 or text[idx - 1] not in "不无没非免":
+                return True
+            start = idx + len(keyword)
+    return False
+
 
 def parse_card(raw: Optional[str]) -> Dict[str, Any]:
     """Parse a stored thread card; anything unusable becomes an empty card."""
@@ -405,6 +427,14 @@ class AfterSalesService:
         if result is None:
             logger.info("decision msg=%s -> silent (no ai result)", msg.msg_id)
             return
+        if (result.get("action") == "new_problem"
+                and not str((result.get("card") or {}).get("platform") or "").strip()
+                and _money_gate_hit(result.get("plan"))):
+            logger.info("decision msg=%s -> money gate: unknown platform + "
+                        "money-related plan; forced ask", msg.msg_id)
+            result["action"] = "ask"
+            result["question"] = MONEY_GATE_QUESTION
+            result["confidence"] = 1.0
         threshold = (self.config.ai.ask_min_confidence if result["action"] == "ask"
                      else self.config.ai.post_min_confidence)
         if result["confidence"] < threshold:
