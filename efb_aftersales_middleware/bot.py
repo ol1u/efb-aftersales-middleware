@@ -70,15 +70,23 @@ class CommandBot:
         while not self.stop_event.is_set():
             try:
                 if not me_checked:
-                    self.username = self.client.get_me().get("username")
+                    me = self.client.get_me() or {}
+                    self.username = me.get("username")
                     me_checked = True
-                updates = self.client.get_updates(offset)
-            except TelegramError as exc:
-                logger.warning("After-sales bot polling failed: %s", exc)
+                updates = self.client.get_updates(offset) or []
+            except Exception as exc:
+                # 原只捕获 TelegramError:get_me 回包无 result 时的 AttributeError、
+                # get_updates 返回 None 后的 TypeError 等都会杀死守护线程,之后
+                # 所有 bot 命令与导入永久无响应且无告警。故全量捕获并继续轮询。
+                logger.warning("After-sales bot polling failed: %s", type(exc).__name__)
                 self.stop_event.wait(5)
                 continue
             for update in updates:
-                offset = update["update_id"] + 1
+                try:
+                    offset = update["update_id"] + 1
+                except (KeyError, TypeError):
+                    logger.warning("Skipping malformed update without update_id")
+                    continue
                 try:
                     self.handle_update(update)
                 except Exception:
